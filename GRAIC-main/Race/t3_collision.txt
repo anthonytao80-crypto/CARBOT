@@ -1,0 +1,4 @@
+Time: 20.94, Collision Actor ID: 0, Collision Actor Type: static.terrain
+Time: 25.94, Collision Actor ID: 0, Collision Actor Type: static.terrain
+Time: 26.8, Collision Actor ID: 30, Collision Actor Type: vehicle.tesla.model3
+Time: 27.65, Collision Actor ID: 0, Collision Actor Type: static.terrain
