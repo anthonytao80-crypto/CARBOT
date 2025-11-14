@@ -6,7 +6,6 @@ from collections import deque
 import sys
 import glob
 import os
-wait_timer=100
 class Agent():
     def __init__(self, vehicle=None):
         self.vehicle = vehicle
@@ -29,7 +28,7 @@ class Agent():
                                                          0)
         self._lat_controller = PIDLateralController(self.vehicle,
                                                     0,
-                                                    1.1,
+                                                    2.1,
                                                     0.01,
                                                     0)
 
@@ -47,13 +46,7 @@ class Agent():
 
         obstacle_left = False
         obstacle_right = False
-        global wait_timer
-        if wait_timer > 0:
-            wait_timer -= 1
-            control.steer = 0.0
-            control.throttle=0.0
-            control.brake=1.0
-            return control
+
         for obs in filtered_obstacles:
             ox, oy = obs.get_location().x, obs.get_location().y
             vec_x, vec_y = ox - ego_x, oy - ego_y
@@ -84,7 +77,7 @@ class Agent():
             self.avoidance_mode = None
 
 
-        lateral_shift = 3.1
+        lateral_shift = 3.15
         if self.avoidance_timer > 0 and self.avoidance_mode is not None:
             decay = self.avoidance_timer / 20.0  # shorter decay window
             if self.avoidance_mode == "left":
@@ -243,7 +236,7 @@ class Agent():
         curve_radius = self.estimate_curvature_radius(waypoints)
 
         # ------------------------------
-        # 弯道减速逻辑
+        # 弯道减速逻辑（原版）
         # ------------------------------
         steer_strength = abs(steer)
 
