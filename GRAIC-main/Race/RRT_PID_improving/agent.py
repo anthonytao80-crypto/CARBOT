@@ -11,208 +11,126 @@ class Agent():
         self.vehicle = vehicle
         self.desired_speed = 25
         self.stopping_distance = 15.0
-        self.critical_distance = 5.0 
+        self.critical_distance = 5.0
         self.step_size = 10.0
         self.max_iterations = 50
         self.goal_sample_rate = 0.2
         self.min_distance_to_obstacle = 10
         self.search_radius = 100.0
-        self.steer = 0
         self.avoidance_mode = None
         self.avoidance_timer = 0
-        self.in_turn = False
-        self.turn_timer = 0
-        self._lon_controller = PIDLongitudinalController(self.vehicle,
-                                                         15,
-                                                         0.01,
-                                                         0)
-        self._lat_controller = PIDLateralController(self.vehicle,
-                                                    0,
-                                                    2.1,
-                                                    0.01,
-                                                    0)
 
+        self._lon_controller = PIDLongitudinalController(self.vehicle, 15, 0.01, 0)
+        self._lat_controller = PIDLateralController(self.vehicle, 0, 2.1, 0.01, 0)
+
+    # ======================= Run Step =======================
     def run_step(self, filtered_obstacles, waypoints, vel, transform, boundary):
         control = carla.VehicleControl()
-        ego_x = transform.location.x
-        ego_y = transform.location.y
+        ego_x, ego_y = transform.location.x, transform.location.y
         ego_yaw = transform.rotation.yaw
+        ego_yaw_rad = math.radians(ego_yaw)
         current_speed = math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
 
-        yaw_rad = math.radians(ego_yaw)
-        forward_x, forward_y = math.cos(yaw_rad), math.sin(yaw_rad)
-        left_x, left_y = -forward_y, forward_x
-        right_x, right_y = forward_y, -forward_x
+        fx, fy = math.cos(ego_yaw_rad), math.sin(ego_yaw_rad)
+        lx, ly = -fy, fx  # 左方向向量
 
+        # =================== 1) 目标点 ===================
         target_x, target_y, need_brake = self.compute_dynamic_target(
-            ego_x, ego_y, ego_yaw,
-            filtered_obstacles,
-            boundary,
-            lookahead=8.0
+            ego_x, ego_y, ego_yaw, filtered_obstacles, boundary, lookahead=8.0
         )
 
+        # =================== 2) RRT 路径规划 ===================
+        left, right = boundary
         path = self.rrt_plan(ego_x, ego_y, target_x, target_y, filtered_obstacles, boundary)
         next_x, next_y = path[10] if path and len(path) > 10 else (target_x, target_y)
 
-        #steering = self.calculate_steering(ego_x, ego_y, ego_yaw, next_x, next_y)
-        steering = self._lat_controller.run_step(ego_x,ego_y,next_x,next_y,ego_yaw)
-        control.steer = steering
+        # =================== 3) 横向控制 ===================
+        control.steer = self._lat_controller.run_step(ego_x, ego_y, next_x, next_y, ego_yaw)
 
+        # =================== 4) 纵向控制 ===================
         v_desired = self.calculate_speed_control(
             ego_x, ego_y, ego_yaw, filtered_obstacles, current_speed,
-            steering, boundary[0], boundary[1], (target_x, target_y), waypoints)
-        acceleration = self._lon_controller.run_step(current_speed,v_desired)
+            control.steer, left, right, (target_x, target_y), waypoints
+        )
+        acceleration = self._lon_controller.run_step(current_speed, v_desired)
+
         if acceleration >= 0.0:
             control.throttle = min(acceleration, 0.75)
             control.brake = 0.0
         else:
             control.throttle = 0.0
             control.brake = min(abs(acceleration), 0.5)
-        if need_brake or self.Emergency_brake(ego_x, ego_y, ego_yaw, filtered_obstacles, current_speed, boundary[0], boundary[1]):
+
+        # =================== 5) 紧急制动 ===================
+        if need_brake or self.Emergency_brake(ego_x, ego_y, ego_yaw, filtered_obstacles, current_speed, left, right):
             control.brake = 1.0
             control.throttle = 0.0
+
         return control
 
+    # ======================= 紧急制动 =======================
     def Emergency_brake(self, ego_x, ego_y, ego_yaw, obstacles, speed, left, right):
-        yaw_rad = math.radians(ego_yaw)
-        fx, fy = math.cos(yaw_rad), math.sin(yaw_rad)
+        ego_yaw_rad = math.radians(ego_yaw)
+        fx, fy = math.cos(ego_yaw_rad), math.sin(ego_yaw_rad)
         self.stopping_distance = speed ** 2 / 10
 
-        # Road width analysis
-        road_width = self.estimate_road_width(left, right, index=5)
-        is_narrow_road = road_width < 5  # meters
-
-        # Emergency brake
+        # 只考虑前方 ±10°，距离 < stopping_distance + margin 的障碍物
         for obs in obstacles:
             ox, oy = obs.get_location().x, obs.get_location().y
-            vx, vy = obs.get_velocity().x, obs.get_velocity().y
             dx, dy = ox - ego_x, oy - ego_y
             dist = math.hypot(dx, dy)
-            dot = dx * fx + dy * fy
-            if dist > 0 and dot > 0 and dot / dist > math.cos(math.radians(10)):
-                rel_speed = speed - (vx * fx + vy * fy)
-                if rel_speed > 0 and dist < self.stopping_distance + 5:
-                    return True
+            if dist == 0:
+                continue
+            dot = (dx * fx + dy * fy) / dist
+            if dot > math.cos(math.radians(10)) and dist < self.stopping_distance + 5:
+                return True
         return False
 
-    def compute_dynamic_target(self, ego_x, ego_y, ego_yaw, filtered_obstacles, boundary,
-                               lookahead=20.0, min_gap=7.0, lateral_shift=3.0):
 
-        # === 1) 道路方向（车辆方向作为参考） ===
+    # ======================= 动态目标点 =======================
+    def compute_dynamic_target(self, ego_x, ego_y, ego_yaw, filtered_obstacles, boundary, lookahead=20.0, min_gap=7.0, lateral_shift=3.0):
         yaw_rad = math.radians(ego_yaw)
         fx, fy = math.cos(yaw_rad), math.sin(yaw_rad)
-        lx, ly = -fy, fx  # 左方向向量
+        lx, ly = -fy, fx
 
         left_pts, right_pts = boundary
-
-        # === 2) 获取道路中心线基础目标点 ===
         center_x, center_y = self.get_centerline_target(ego_x, ego_y, lookahead, boundary)
 
-        # === 3) 找到离 centerline 最近的 boundary 点对 ===
-        min_dist = float('inf')
-        nearest_idx = 0
+        # 车道左右边界横向坐标
+        lpt = left_pts[0].transform.location
+        rpt = right_pts[0].transform.location
+        lane_min = min((lpt.x - center_x)*lx + (lpt.y - center_y)*ly,
+                       (rpt.x - center_x)*lx + (rpt.y - center_y)*ly)
+        lane_max = max((lpt.x - center_x)*lx + (lpt.y - center_y)*ly,
+                       (rpt.x - center_x)*lx + (rpt.y - center_y)*ly)
 
-        for i, (l, r) in enumerate(zip(left_pts, right_pts)):
-            mx = (l.transform.location.x + r.transform.location.x) / 2.0
-            my = (l.transform.location.y + r.transform.location.y) / 2.0
-            d = math.hypot(mx - center_x, my - center_y)
-            if d < min_dist:
-                min_dist = d
-                nearest_idx = i
+        # 障碍物横向位置
+        obs_lat = np.array([((obs.get_location().x - ego_x)*lx + (obs.get_location().y - ego_y)*ly)
+                            for obs in filtered_obstacles if math.hypot(obs.get_location().x - ego_x, obs.get_location().y - ego_y) < 20])
 
-        # 该位置的左右车道边界点
-        lpt = left_pts[nearest_idx].transform.location
-        rpt = right_pts[nearest_idx].transform.location
-
-        # === 4) 计算车道线在横向方向上的坐标 ===
-        lane_left = (lpt.x - center_x) * lx + (lpt.y - center_y) * ly
-        lane_right = (rpt.x - center_x) * lx + (rpt.y - center_y) * ly
-        lane_min, lane_max = min(lane_left, lane_right), max(lane_left, lane_right)
-
-        # === 5) 障碍物在横向上的坐标 ===
-        obs_lat = []
-        for obs in filtered_obstacles:
-            ox, oy = obs.get_location().x, obs.get_location().y
-            dx, dy = ox - ego_x, oy - ego_y
-            if math.hypot(dx, dy) < 20:
-                lat = dx * lx + dy * ly
-                obs_lat.append(lat)
-
-        # === 6) 无障碍物 → 返回 centerline ===
         if len(obs_lat) == 0:
-            target_x, target_y, need_brake = center_x, center_y, False
+            return center_x, center_y, False
 
+        # 找最大横向空隙
+        positions = np.concatenate(([lane_min], np.sort(obs_lat), [lane_max]))
+        gaps = positions[1:] - positions[:-1]
+        max_idx = np.argmax(gaps)
+        max_gap = gaps[max_idx]
+        gap_left, gap_right = positions[max_idx], positions[max_idx+1]
+
+        if max_gap > min_gap:
+            best_lat = (gap_left + gap_right)/2
+            target_x = center_x + best_lat * lx
+            target_y = center_y + best_lat * ly
+            need_brake = False
         else:
-            # === 7) 找最大横向空隙 ===
-            positions = [lane_min] + sorted(obs_lat) + [lane_max]
+            target_x, target_y = center_x, center_y
+            need_brake = True
 
-            max_gap = 0
-            gap_left = 0
-            gap_right = 0
-
-            for i in range(len(positions) - 1):
-                gap = positions[i + 1] - positions[i]
-                if gap > max_gap:
-                    max_gap = gap
-                    gap_left = positions[i]
-                    gap_right = positions[i + 1]
-            #print(max_gap)
-
-            # === 8) 自动决定偏置方向 ===
-            if max_gap > min_gap:
-
-                # 识别 gap 左端是否为障碍物
-                left_is_obs = (gap_left in obs_lat)
-                right_is_obs = (gap_right in obs_lat)
-
-                # 计算目标偏置值
-                best_lat = None
-
-                if left_is_obs and not right_is_obs:
-                    # --- 障碍物在左 → 靠右
-                    candidate = gap_right - 1.7
-                    test_pos = gap_right - 1.8
-                    # 安全验证
-                    if test_pos > gap_left and lane_min <= test_pos <= lane_max:
-                        best_lat = candidate
-                    else:
-                        best_lat = (gap_left + gap_right) / 2.0
-
-                elif right_is_obs and not left_is_obs:
-                    # --- 障碍物在右 → 靠左
-                    candidate = gap_left + 1.7
-                    test_pos = gap_left + 1.8
-                    if test_pos < gap_right and lane_min <= test_pos <= lane_max:
-                        best_lat = candidate
-                    else:
-                        best_lat = (gap_left + gap_right) / 2.0
-                elif right_is_obs and left_is_obs:
-                    candidate = gap_right - 1.7
-                    test_pos = gap_right - 1.8
-                    # 安全验证
-                    if test_pos > gap_left and lane_min <= test_pos <= lane_max:
-                        best_lat = candidate
-                    else:
-                        best_lat = (gap_left + gap_right) / 2.0
-
-                else:
-                    # 两边都是车道边界（没有实际障碍物），偏中间即可
-                    best_lat = (gap_left + gap_right) / 2.0
-
-                target_x = center_x + best_lat * lx
-                target_y = center_y + best_lat * ly
-                need_brake = False
-
-            else:
-                target_x, target_y, need_brake = center_x, center_y, True
-
-        # === 9) 叠加 avoidance_mode 的 decay 偏置 ===
-        if getattr(self, "avoidance_timer", 0) > 0 and getattr(self, "avoidance_mode", None) is not None:
+        # 避障偏置衰减
+        if self.avoidance_timer > 0 and self.avoidance_mode:
             decay = self.avoidance_timer / 20.0
-            if self.avoidance_mode == "left":
-                sx, sy = lx, ly
-            else:
-                sx, sy = -lx, -ly
+            sx, sy = (lx, ly) if self.avoidance_mode == "left" else (-lx, -ly)
             target_x += lateral_shift * decay * sx
             target_y += lateral_shift * decay * sy
 

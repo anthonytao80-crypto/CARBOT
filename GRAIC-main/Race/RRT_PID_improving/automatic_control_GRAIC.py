@@ -701,7 +701,7 @@ def game_loop(args):
             random.seed(args.seed)
 
         client = carla.Client(args.host, args.port)
-        client.set_timeout(4.0)
+        client.set_timeout(6.0)
 
         traffic_manager = client.get_trafficmanager()
         # sim_world = client.get_world()
