@@ -1,0 +1,8 @@
+        self.steering_pid = PIDController(kp=1.2, ki=0.05, kd=0.3, integral_limit=0.5, output_limit=1.0)
+        
+        # 横向PID（横向误差）：用于路径跟踪的横向偏差控制
+        # 当车辆偏离路径中心线时使用
+        self.lateral_error_pid = PIDController(kp=0.15, ki=0.01, kd=0.1, integral_limit=2.0, output_limit=0.3)
+        
+        # 纵向PID：控制速度
+        self.speed_pid = PIDController(kp=0.8, ki=0.1, kd=0.2, integral_limit=5.0, output_limit=1.0)
