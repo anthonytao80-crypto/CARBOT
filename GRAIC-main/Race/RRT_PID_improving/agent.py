@@ -9,11 +9,11 @@ import os
 class Agent():
     def __init__(self, vehicle=None):
         self.vehicle = vehicle
-        self.desired_speed = 30
+        self.desired_speed = 25
         self.stopping_distance = 15.0
         self.critical_distance = 5.0 
         self.step_size = 10.0
-        self.max_iterations = 100
+        self.max_iterations = 50
         self.goal_sample_rate = 0.2
         self.min_distance_to_obstacle = 10
         self.search_radius = 100.0
@@ -68,7 +68,7 @@ class Agent():
         else:
             control.throttle = 0.0
             control.brake = min(abs(acceleration), 0.5)
-        if need_brake:
+        if need_brake or self.Emergency_brake(ego_x, ego_y, ego_yaw, filtered_obstacles, current_speed, boundary[0], boundary[1]):
             control.brake = 1.0
             control.throttle = 0.0
         return control
@@ -96,7 +96,7 @@ class Agent():
         return False
 
     def compute_dynamic_target(self, ego_x, ego_y, ego_yaw, filtered_obstacles, boundary,
-                               lookahead=20.0, min_gap=1.0, lateral_shift=3.0):
+                               lookahead=20.0, min_gap=7.0, lateral_shift=3.0):
 
         # === 1) 道路方向（车辆方向作为参考） ===
         yaw_rad = math.radians(ego_yaw)
@@ -156,6 +156,7 @@ class Agent():
                     max_gap = gap
                     gap_left = positions[i]
                     gap_right = positions[i + 1]
+            #print(max_gap)
 
             # === 8) 自动决定偏置方向 ===
             if max_gap > min_gap:
@@ -169,8 +170,8 @@ class Agent():
 
                 if left_is_obs and not right_is_obs:
                     # --- 障碍物在左 → 靠右
-                    candidate = gap_right - 1.2
-                    test_pos = gap_right - 1.5
+                    candidate = gap_right - 1.7
+                    test_pos = gap_right - 1.8
                     # 安全验证
                     if test_pos > gap_left and lane_min <= test_pos <= lane_max:
                         best_lat = candidate
@@ -179,9 +180,17 @@ class Agent():
 
                 elif right_is_obs and not left_is_obs:
                     # --- 障碍物在右 → 靠左
-                    candidate = gap_left + 1.2
-                    test_pos = gap_left + 1.5
+                    candidate = gap_left + 1.7
+                    test_pos = gap_left + 1.8
                     if test_pos < gap_right and lane_min <= test_pos <= lane_max:
+                        best_lat = candidate
+                    else:
+                        best_lat = (gap_left + gap_right) / 2.0
+                elif right_is_obs and left_is_obs:
+                    candidate = gap_right - 1.7
+                    test_pos = gap_right - 1.8
+                    # 安全验证
+                    if test_pos > gap_left and lane_min <= test_pos <= lane_max:
                         best_lat = candidate
                     else:
                         best_lat = (gap_left + gap_right) / 2.0
