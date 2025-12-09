@@ -22,10 +22,13 @@ import numpy.random as random
 import re
 import sys
 import weakref
-
+import matplotlib.pyplot as plt
 import pickle
 import time
 import subprocess
+import psutil
+import time
+
 
 try:
     import pygame
@@ -116,6 +119,7 @@ class World(object):
         self.world.on_tick(hud.on_world_tick)
         self.recording_enabled = False
         self.recording_start = 0
+
 
     def restart(self, args):
         """Restart the world"""
@@ -684,6 +688,45 @@ class CameraManager(object):
 # ==============================================================================
 # -- Game Loop ---------------------------------------------------------
 # ==============================================================================
+def plot_and_save_trajectories(cur_x_list, cur_y_list, target_x_list, target_y_list):
+    plt.figure(figsize=(8, 6))
+
+    # Ego trajectory
+    plt.plot(cur_x_list, cur_y_list, label="Ego Trajectory")
+
+    # Target trajectory
+    plt.plot(target_x_list, target_y_list, label="Target Trajectory", linestyle="--")
+
+    plt.xlabel("X Position")
+    plt.ylabel("Y Position")
+    plt.title("RRT with PID: Ego vs Target Trajectories")
+    plt.legend()
+    plt.grid(True)
+    plt.axis("equal")
+
+    # Save to current directory
+    save_path = "trajectory.png"
+    plt.savefig(save_path, dpi=300)
+
+    print(f"Saved figure to: {save_path}")
+
+    plt.close()
+
+def save_cpu_log(time_list, cpu_list, filename="cpu_usage_log.txt"):
+    with open(filename, "w") as f:
+        f.write("Time(s)\tCPU_Usage(%)\n")
+        for t, cpu in zip(time_list, cpu_list):
+            f.write(f"{t:.3f}\t{cpu:.2f}\n")
+    print(f"CPU log saved to {filename}")
+
+def save_acc_log(time_list, ax_list, ay_list, amag_list,
+                 filename="acceleration_log.txt"):
+    with open(filename, "w") as f:
+        f.write("Time(s)\tAx(m/s^2)\tAy(m/s^2)\tA_mag(m/s^2)\n")
+        for t, ax, ay, amag in zip(time_list, ax_list, ay_list, amag_list):
+            f.write(f"{t:.3f}\t{ax:.4f}\t{ay:.4f}\t{amag:.4f}\n")
+
+    print(f"Acceleration log saved to {filename}")
 
 
 def game_loop(args):
@@ -695,13 +738,27 @@ def game_loop(args):
     pygame.init()
     pygame.font.init()
     world = None
+    # cur_x_list = []
+    # cur_y_list = []
+    # target_x_list = []
+    # target_y_list = []
+    # cpu_time_list = []
+    # cpu_usage_list = []
+    # start_wall_time = time.time()
+    acc_time_list = []
+    acc_x_list = []
+    acc_y_list = []
+    acc_mag_list = []
+
+    prev_vel = None
+    prev_time = None
 
     try:
         if args.seed:
             random.seed(args.seed)
 
         client = carla.Client(args.host, args.port)
-        client.set_timeout(6.0)
+        client.set_timeout(40.0)
 
         traffic_manager = client.get_trafficmanager()
         # sim_world = client.get_world()
@@ -742,12 +799,18 @@ def game_loop(args):
                 world.world.tick()
             else:
                 world.world.wait_for_tick()
+
             if controller.parse_events():
                 return
             
             world.tick(clock)
             world.render(display)
             pygame.display.flip()
+
+            # elapsed = time.time() - start_wall_time
+            # cpu_percent = psutil.cpu_percent(interval=None)
+            # cpu_time_list.append(elapsed)
+            # cpu_usage_list.append(cpu_percent)
 
             if start:
                 start_time = hud.simulation_time
@@ -758,6 +821,10 @@ def game_loop(args):
 
             cur_x, cur_y, cur_z = cur_pos.x, cur_pos.y, cur_pos.z
             target_x, target_y, target_z = waypoints[idx]
+            # cur_x_list.append(cur_x)
+            # cur_y_list.append(cur_y)
+            # target_x_list.append(target_x)
+            # target_y_list.append(target_y)
             distance = math.sqrt((cur_x - target_x)**2 + (cur_y-target_y)**2)
             # print(distance, idx)
 
@@ -854,17 +921,40 @@ def game_loop(args):
             boundary.append(left_boundary)
             boundary.append(right_boundary)
             ############################################
-            
+
 
             ########## Get Vehicle State Info ##########
             vel = vehicle.get_velocity()
             transform = vehicle.get_transform()
+            # === Compute acceleration (finite difference) ===
+            cur_time = hud.simulation_time
+
+            # if prev_vel is not None and prev_time is not None:
+            #     dt = cur_time - prev_time
+            #     ax = (vel.x - prev_vel.x) / dt
+            #     ay = (vel.y - prev_vel.y) / dt
+            #     #az = (vel.z - prev_vel.z) / dt
+            #
+            #     acc_mag = math.sqrt(ax * ax + ay * ay)
+            #
+            #     acc_time_list.append(cur_time)
+            #     acc_x_list.append(ax)
+            #     acc_y_list.append(ay)
+            #     acc_mag_list.append(acc_mag)
+
+            prev_vel = vel
+            prev_time = cur_time
+
             ############################################
 
             end_waypoints = min(len(waypoints), idx + 50)
             control = agent.run_step(filtered_obstacles, waypoints[idx:end_waypoints], vel, transform, boundary)
             control.manual_gear_shift = False
             world.player.apply_control(control)
+        # plot_and_save_trajectories(cur_x_list, cur_y_list, target_x_list, target_y_list)
+        # save_cpu_log(cpu_time_list, cpu_usage_list)
+        # save_acc_log(acc_time_list, acc_x_list, acc_y_list, acc_mag_list)
+
 
     finally:
 

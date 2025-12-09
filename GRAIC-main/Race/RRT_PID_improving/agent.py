@@ -9,7 +9,7 @@ import os
 class Agent():
     def __init__(self, vehicle=None):
         self.vehicle = vehicle
-        self.desired_speed = 25
+        self.desired_speed = 45
         self.stopping_distance = 15.0
         self.critical_distance = 5.0
         self.step_size = 10.0

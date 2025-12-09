@@ -153,20 +153,68 @@ class ScenarioList:
             return None
 
 
+# class ScenarioGenerator:
+#     def __init__(self, track_id):
+#         self.scenarioList = ScenarioList(track_id)
+#
+#     def generateScenario(self, result=None):
+#         if not result:
+#             return self.scenarioList.getUnitScenario()
+#         else:
+#             self.scenarioList.update(result)
+#             if self.scenarioList.hasUnitScenario():
+#                 return self.scenarioList.getUnitScenario()
+#             else:
+#                 return self.scenarioList.getCompositeScenario()
 class ScenarioGenerator:
-    def __init__(self, track_id):
+    def __init__(self, track_id, num_obstacles=9):
         self.scenarioList = ScenarioList(track_id)
+        self.generated_count = 0
+        self.num_obstacles = num_obstacles
 
     def generateScenario(self, result=None):
+        # 达到数量上限，停止生成
+        if self.generated_count >= self.num_obstacles:
+            return None
+
         if not result:
-            return self.scenarioList.getUnitScenario()
+            scenario = self.scenarioList.getUnitScenario()
         else:
             self.scenarioList.update(result)
             if self.scenarioList.hasUnitScenario():
-                return self.scenarioList.getUnitScenario()
+                scenario = self.scenarioList.getUnitScenario()
             else:
-                return self.scenarioList.getCompositeScenario()
+                scenario = self.scenarioList.getCompositeScenario()
 
+        if scenario:
+            self.generated_count += 1
+        return scenario
+
+# class ScenarioGenerator:
+#     def __init__(self, track_id, num_obstacles=9):
+#         """
+#         track_id: 当前赛道编号
+#         num_obstacles: 要生成的障碍物数量
+#         """
+#         self.scenarioList = ScenarioList(track_id)
+#         self.num_obstacles = num_obstacles
+#         self.generated_count = 0  # 已生成的障碍物数量
+#
+#     def generateScenario(self, result=None):
+#         if self.generated_count < self.num_obstacles:
+#             self.generated_count += 1
+#             return self.scenarioList.getUnitScenario()
+#         else:
+#             # 达到指定数量后不再生成新场景
+#             return None
+
+
+# class ScenarioGenerator:
+#     def __init__(self, track_id):
+#         pass
+#
+#     def generateScenario(self, result=None):
+#         return None     # 永远不生成 scenario
 
 class ScenarioNode:
     def __init__(self,
