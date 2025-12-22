@@ -1,6 +1,7 @@
 
 import math
 
+from shapely.constructive import boundary
 
 ## Action Setting
 action_size      = 3            ## [ steer,throttle,brake ]
@@ -80,35 +81,35 @@ Args = {
     'sac_policy_noise' : int(1),
 }
 
-# EnvArgs = {
-#     'debug' : False,
-#     'checker' : True,                           ## Check Image Publish (Laser Scan & Map) (ROS)
-#     'use_global' : True,
-#     'set_init_yaw' : True,
-#     'state_class' : state_class,
-# ## about laser state
-#     'scan_topic' : "/scan",                     ## (ROS)
-#     'odom_topic' : "/odom",                     ## (ROS)
-#     'scan_angle' : 240,                         ## (-scan_angle/2 ← 0 → scan_angle/2)
-#     'laser_data_size' : laser_state_size,
-# ## about action
-#     'state_freq' : -1,                          ## Action execute delay (s), unused if less than < 0
-#     'robot_wrong' : 0.25,                       ## restart of simulation (roll)
-# ## distance threshold for training
-#     'goal_dist_tol' : 0.3,                      ## goal position arriving
-#     'goal_angle_tol' : 15 * math.pi / 180,      ## goal angle arriving
-#     'inter_point_tol' : 0.5,                    ## inter points arriving (optional)
-#     'collision_dist' : 0.15,                    ## collision
-# ## distance threshold for evolution
-#     'eval_goal_tol' : 0.1,
-#     'eval_angle_tol' : 15 * math.pi / 180,
-#     'eval_inter_tol' : 0.5,
-#     'eval_coll_dist' : 0.1,
-# ## reward
-#     'arrived_R'   : 60,
-#     'collision_R' : -80,
-#     'inter_R'    : 10.,
-# }
+EnvArgs = {
+    'debug' : False,
+    'checker' : True,                           ## Check Image Publish (Laser Scan & Map) (ROS)
+    'use_global' : True,
+    'set_init_yaw' : True,
+    'state_class' : state_class,
+## about laser state
+    'scan_topic' : "/scan",                     ## (ROS)
+    'odom_topic' : "/odom",                     ## (ROS)
+    'scan_angle' : 240,                         ## (-scan_angle/2 ← 0 → scan_angle/2)
+    'laser_data_size' : laser_state_size,
+## about action
+    'state_freq' : -1,                          ## Action execute delay (s), unused if less than < 0
+    'robot_wrong' : 0.25,                       ## restart of simulation (roll)
+## distance threshold for training
+    'goal_dist_tol' : 0.3,                      ## goal position arriving
+    'goal_angle_tol' : 15 * math.pi / 180,      ## goal angle arriving
+    'inter_point_tol' : 0.5,                    ## inter points arriving (optional)
+    'collision_dist' : 0.15,                    ## collision
+## distance threshold for evolution
+    'eval_goal_tol' : 0.1,
+    'eval_angle_tol' : 15 * math.pi / 180,
+    'eval_inter_tol' : 0.5,
+    'eval_coll_dist' : 0.1,
+## reward
+    'arrived_R'   : 60,
+    'collision_R' : -80,
+    'inter_R'    : 10.,
+}
 
 ## =====================================
 ##  For Network Model

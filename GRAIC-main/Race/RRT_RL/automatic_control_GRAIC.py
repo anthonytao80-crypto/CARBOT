@@ -67,6 +67,9 @@ import carla
 from carla import ColorConverter as cc
 
 from agent import Agent
+from network import SAC
+from replaybuffer import ReplayBuffer
+from config_set import Args
 
 
 # ==============================================================================
@@ -729,6 +732,89 @@ def save_acc_log(time_list, ax_list, ay_list, amag_list,
     print(f"Acceleration log saved to {filename}")
 
 
+def build_state(cur_pos, cur_yaw, target_x, target_y, vel, filtered_obstacles, boundary, prev_action):
+    """
+    构建状态向量
+    状态包括: goal(2) + action(3) + current_state(3) + boundary(4) + obstacles(20) + speed(1) = 33
+    """
+    state = []
+    
+    # Goal (2): target_x, target_y
+    state.append(target_x)
+    state.append(target_y)
+    
+    # Previous action (3): steer, throttle, brake
+    if prev_action is None:
+        state.extend([0.0, 0.0, 0.0])
+    else:
+        state.extend([prev_action.steer, prev_action.throttle, prev_action.brake])
+    
+    # Current state (3): current_x, current_y, current_yaw
+    state.append(cur_pos.x)
+    state.append(cur_pos.y)
+    state.append(math.radians(cur_yaw))
+    
+    # Boundary (4): left_x, left_y, right_x, right_y (取最近的边界点)
+    left_boundary, right_boundary = boundary
+    if len(left_boundary) > 0 and len(right_boundary) > 0:
+        left_wp = left_boundary[0]
+        right_wp = right_boundary[0]
+        state.append(left_wp.transform.location.x)
+        state.append(left_wp.transform.location.y)
+        state.append(right_wp.transform.location.x)
+        state.append(right_wp.transform.location.y)
+    else:
+        state.extend([0.0, 0.0, 0.0, 0.0])
+    
+    # Filtered obstacles (20): 最多5个障碍物，每个4个值 (ox, oy, vx, vy)
+    obstacle_data = [0.0] * 20
+    for i, obs in enumerate(filtered_obstacles[:5]):
+        obs_loc = obs.get_location()
+        obs_vel = obs.get_velocity()
+        obstacle_data[i*4] = obs_loc.x
+        obstacle_data[i*4+1] = obs_loc.y
+        obstacle_data[i*4+2] = obs_vel.x
+        obstacle_data[i*4+3] = obs_vel.y
+    state.extend(obstacle_data)
+    
+    # Current speed (1)
+    speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+    state.append(speed)
+    
+    return np.array(state, dtype=np.float32)
+
+
+def calculate_reward(cur_pos, target_x, target_y, vel, has_collision, reached_goal, prev_distance=None):
+    """
+    计算奖励
+    """
+    reward = 0.0
+    
+    # 碰撞惩罚
+    if has_collision:
+        reward += Args.get('collision_R', -80)
+        return reward
+    
+    # 到达终点奖励
+    if reached_goal:
+        reward += Args.get('arrived_R', 60)
+        return reward
+    
+    # 距离奖励（鼓励接近目标）
+    distance = math.sqrt((cur_pos.x - target_x)**2 + (cur_pos.y - target_y)**2)
+    if prev_distance is not None:
+        # 奖励接近目标的行为
+        distance_reward = (prev_distance - distance) * 10.0
+        reward += distance_reward
+    
+    # 速度奖励（鼓励保持合理速度）
+    speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+    speed_reward = -abs(speed - 20.0) * 0.1  # 目标速度约20 m/s
+    reward += speed_reward
+    
+    return reward
+
+
 def game_loop(args):
     """
     Main loop of the simulation. It handles updating all the HUD information,
@@ -781,6 +867,40 @@ def game_loop(args):
         world = World(client.get_world(), hud, args)
         controller = KeyboardControl(world)
 
+        # 初始化 SAC 网络和 Replay Buffer
+        max_action = np.array(Args['max_action'])
+        sac_agent = SAC(max_action,
+                        Args['a_lr'],
+                        Args['c_lr'],
+                        Args['sac_gamma'],
+                        Args['sac_tau'],
+                        Args['sac_alpha'],
+                        Args['sac_policy'],
+                        Args['sac_policy_freq'],
+                        Args['sac_auto_entropy_tuning'],
+                        Args['debug'],
+                        Args['back_enable'])
+        
+        if Args['model_load']:
+            sac_agent.load(Args['train_file'], Args['model_path'])
+        
+        replay_buffer = ReplayBuffer(Args['frame_size'],
+                                     Args['state_size'],
+                                     Args['action_size'],
+                                     Args['buffer_size'],
+                                     Args['buffer_seed'])
+
+        # 训练相关变量
+        episode = 0
+        total_step = 0
+        state_history = []  # 存储连续的状态帧
+        prev_state_sequence = None  # 上一个状态序列
+        prev_action = None
+        prev_distance = None
+        episode_reward = 0.0
+        episode_steps = 0
+        has_collision_flag = False  # 碰撞标志
+
         agent = Agent()
 
         # TODO: Change track name to a parameter
@@ -818,87 +938,49 @@ def game_loop(args):
 
             vehicle = world.player
             cur_pos = vehicle.get_location()
+            vel = vehicle.get_velocity()
+            transform = vehicle.get_transform()
 
             cur_x, cur_y, cur_z = cur_pos.x, cur_pos.y, cur_pos.z
             target_x, target_y, target_z = waypoints[idx]
-            # cur_x_list.append(cur_x)
-            # cur_y_list.append(cur_y)
-            # target_x_list.append(target_x)
-            # target_y_list.append(target_y)
             distance = math.sqrt((cur_x - target_x)**2 + (cur_y-target_y)**2)
-            # print(distance, idx)
 
-            # Both Scoring Function + Waypoint Update
-            if distance < 5:
-                idx += 1
-                if idx == len(waypoints):
-                    cur_time = hud.simulation_time
-                    total_score += (cur_time - start_time)
-                    start_time =  cur_time
-                    hud.notification("Score: " + str(round(total_score, 1)), 3)
-                    print("Lap Done")
-                    print("Final Score is ", total_score)
-                    with open("{}_score.txt".format(args.map), 'w') as f:
-                        f.write(str(round(total_score, 2)))
-                    idx = 0
-                    break
-                
-                # Draw the waypoints as Gate for Fancy Visualization
-                x, y, z = waypoints[idx]
-                location = carla.Location(x, y, z)
-                rotation = world.map.get_waypoint(
-                    location,
-                    project_to_road=True,
-                    lane_type=carla.LaneType.Driving).transform.rotation
-                box = carla.BoundingBox(location, carla.Vector3D(0, 6, 4))
+            # 检测碰撞（检查碰撞传感器历史中是否有新的碰撞）
+            collision_history = world.collision_sensor.get_collision_history()
+            current_frame = hud.frame
+            # 检查最近几帧是否有碰撞
+            has_collision = False
+            if len(world.collision_sensor.history) > 0:
+                # 检查最近的碰撞是否发生在当前或最近几帧
+                recent_collisions = [frame for frame, intensity in world.collision_sensor.history[-10:] 
+                                    if intensity > 0 and frame >= current_frame - 10]
+                if len(recent_collisions) > 0:
+                    has_collision = True
+                    has_collision_flag = True
+            
+            # 检测到达终点
+            reached_goal = False
+            if idx == len(waypoints) - 1 and distance < 5:
+                reached_goal = True
 
-                # Goal Gate is RED
-                if idx == len(waypoints) - 1:
-                    world.world.debug.draw_box(
-                        box,
-                        rotation,
-                        thickness=0.5,
-                        color=carla.Color(255, 0, 0, 255),
-                        life_time=0)
-                
-                # Since wps is very dense in Shanghai Track, we only choose 1 in every 4 waypoints
-                elif idx % 4 == 0:
-                    cur_time = hud.simulation_time
-                    total_score += (cur_time - start_time)
-                    start_time =  cur_time
-
-                    hud.notification("Score: " + str(round(total_score, 1)), 3)
-                    world.world.debug.draw_box(
-                        box,
-                        rotation,
-                        thickness=0.5,
-                        color=carla.Color(0, 0, 100, 255),
-                        life_time=2)
+            # 判断 episode 是否结束
+            done = has_collision or reached_goal
 
             ###### Get Obstacles ######
             all_actors = world.world.get_actors()
             sensoring_radius = 100
             filtered_obstacles = []
             for actor in all_actors:
-                # get actor's location
                 cur_loc = actor.get_location()
-                # determine whether actor is within the radius
                 if cur_pos.distance(cur_loc) <= sensoring_radius:
-                    # we need to exclude actors such as camera
-                    # types we need: vehicle, walkers, Traffic signs and traffic lights
-                    # reference: https://github.com/carla-simulator/carla/blob/master/PythonAPI/carla/scene_layout.py
                     if 'vehicle' in actor.type_id and actor.id != vehicle.id:
                         filtered_obstacles.append(actor)
                     elif 'pedestrian' in actor.type_id:
                         filtered_obstacles.append(actor)
                     elif 'static.prop' in actor.type_id:
                         filtered_obstacles.append(actor)
-            # for actor in filtered_obstacles:
-                # print(actor.type_id)
-            # print("\n")
             ############################################
 
-            
             ############## Get Lane Info ###############
             cur_waypoint = world.map.get_waypoint(cur_pos)
             cur_left = cur_waypoint
@@ -922,35 +1004,139 @@ def game_loop(args):
             boundary.append(right_boundary)
             ############################################
 
-
-            ########## Get Vehicle State Info ##########
-            vel = vehicle.get_velocity()
-            transform = vehicle.get_transform()
-            # === Compute acceleration (finite difference) ===
-            cur_time = hud.simulation_time
-
-            # if prev_vel is not None and prev_time is not None:
-            #     dt = cur_time - prev_time
-            #     ax = (vel.x - prev_vel.x) / dt
-            #     ay = (vel.y - prev_vel.y) / dt
-            #     #az = (vel.z - prev_vel.z) / dt
-            #
-            #     acc_mag = math.sqrt(ax * ax + ay * ay)
-            #
-            #     acc_time_list.append(cur_time)
-            #     acc_x_list.append(ax)
-            #     acc_y_list.append(ay)
-            #     acc_mag_list.append(acc_mag)
-
-            prev_vel = vel
-            prev_time = cur_time
-
-            ############################################
-
-            end_waypoints = min(len(waypoints), idx + 50)
-            control = agent.run_step(filtered_obstacles, waypoints[idx:end_waypoints], vel, transform, boundary)
+            # 构建当前状态
+            current_state = build_state(cur_pos, transform.rotation.yaw, target_x, target_y, 
+                                       vel, filtered_obstacles, boundary, prev_action)
+            
+            # 更新状态历史
+            state_history.append(current_state.copy())
+            if len(state_history) > Args['frame_size']:
+                state_history.pop(0)
+            
+            # 确保有足够的状态帧（用当前状态填充）
+            while len(state_history) < Args['frame_size']:
+                state_history.insert(0, current_state.copy())
+            
+            # 构建状态序列 (frame_size, state_size)
+            state_sequence = np.array(state_history, dtype=np.float32)
+            
+            # 从 SAC 获取动作
+            if total_step < Args['warm_up']:
+                # Warm-up 阶段：使用随机动作或简单控制
+                action_array = np.random.uniform(-1, 1, size=Args['action_size'])
+            else:
+                # 训练阶段：从 SAC 获取动作
+                state_input = state_sequence.reshape(1, Args['frame_size'], Args['state_size'])
+                action_array = sac_agent.get_action(state_input, is_train=True)
+            
+            # 将动作转换为控制命令
+            control = carla.VehicleControl()
+            control.steer = float(np.clip(action_array[0], -1.0, 1.0))
+            control.throttle = float(np.clip(action_array[1], 0.0, 1.0))
+            control.brake = float(np.clip(action_array[2], 0.0, 1.0))
             control.manual_gear_shift = False
+            
+            # 应用控制
             world.player.apply_control(control)
+            
+            # 计算奖励
+            reward = calculate_reward(cur_pos, target_x, target_y, vel, has_collision, reached_goal, prev_distance)
+            episode_reward += reward
+            prev_distance = distance
+            
+            # 如果不是第一个 step，存储经验
+            if prev_action is not None and prev_state_sequence is not None:
+                prev_action_array = np.array([prev_action.steer, prev_action.throttle, prev_action.brake], dtype=np.float32)
+                replay_buffer.add(prev_state_sequence, prev_action_array, reward, state_sequence, done)
+            
+            # 保存当前状态序列作为下一个 step 的 prev_state
+            prev_state_sequence = state_sequence.copy()
+            
+            # 定期训练网络
+            if total_step >= Args['warm_up'] and replay_buffer.get_capacity() >= Args['batch_size']:
+                if total_step % 1 == 0:  # 每步训练一次
+                    loss_set = sac_agent.train(replay_buffer, iteration=1, batch_size=Args['batch_size'])
+            
+            prev_action = control
+            episode_steps += 1
+            total_step += 1
+
+            # 如果 episode 结束，重启
+            if done:
+                print(f"Episode {episode} finished. Steps: {episode_steps}, Reward: {episode_reward:.2f}, "
+                      f"Collision: {has_collision}, Reached Goal: {reached_goal}")
+                
+                # 保存模型（可选）
+                if Args['check_save'] and episode % Args['check_step'] == 0:
+                    if Args['model_save']:
+                        now = time.localtime()
+                        save_file = ''.join(('SAC_model_', str(now.tm_year), str(now.tm_mon), 
+                                            str(now.tm_mday), str(now.tm_hour), str(now.tm_min), str(now.tm_sec)))
+                        save_path = os.path.join(Args['model_path'], save_file)
+                        try:
+                            os.makedirs(save_path, exist_ok=True)
+                            sac_agent.save(save_file, save_path)
+                            print(f"Model saved to {save_path}")
+                        except Exception as e:
+                            print(f'Failed to save model: {e}')
+                
+                # 重置 episode 相关变量
+                episode += 1
+                episode_steps = 0
+                episode_reward = 0.0
+                state_history = []
+                prev_state_sequence = None
+                prev_action = None
+                prev_distance = None
+                has_collision_flag = False
+                
+                # 重置碰撞历史
+                world.collision_sensor.history = []
+                world.collision_sensor.prev_collision_actor_id = []
+                
+                # 重启世界（重新生成车辆）
+                world.restart(args)
+                
+                # 重置 waypoint 索引
+                idx = 0
+                start = True
+                
+                # 等待一帧以确保世界完全重启
+                continue
+
+            # Waypoint 更新逻辑（非训练相关）
+            if distance < 5:
+                idx += 1
+                if idx >= len(waypoints):
+                    idx = len(waypoints) - 1
+                
+                # Draw the waypoints as Gate for Fancy Visualization
+                if idx < len(waypoints):
+                    x, y, z = waypoints[idx]
+                    location = carla.Location(x, y, z)
+                    rotation = world.map.get_waypoint(
+                        location,
+                        project_to_road=True,
+                        lane_type=carla.LaneType.Driving).transform.rotation
+                    box = carla.BoundingBox(location, carla.Vector3D(0, 6, 4))
+
+                    # Goal Gate is RED
+                    if idx == len(waypoints) - 1:
+                        world.world.debug.draw_box(
+                            box,
+                            rotation,
+                            thickness=0.5,
+                            color=carla.Color(255, 0, 0, 255),
+                            life_time=0)
+                    
+                    # Since wps is very dense in Shanghai Track, we only choose 1 in every 4 waypoints
+                    elif idx % 4 == 0:
+                        world.world.debug.draw_box(
+                            box,
+                            rotation,
+                            thickness=0.5,
+                            color=carla.Color(0, 0, 100, 255),
+                            life_time=2)
         # plot_and_save_trajectories(cur_x_list, cur_y_list, target_x_list, target_y_list)
         # save_cpu_log(cpu_time_list, cpu_usage_list)
         # save_acc_log(acc_time_list, acc_x_list, acc_y_list, acc_mag_list)
