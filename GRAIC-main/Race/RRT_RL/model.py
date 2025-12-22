@@ -112,7 +112,7 @@ class GaussianPolicy(nn.Module):
         log_std = torch.clamp(log_std, min=ModelArgs['LOG_SIG_MIN'], max=ModelArgs['LOG_SIG_MAX'])
         return mean.to(torch.float32), log_std.to(torch.float32)
 
-    def sample(self, s):
+    def sample(self, s, reparameterize):
         mean, log_std = self.forward(s)
         std = torch.exp(log_std)
         normal = Normal(mean, std)

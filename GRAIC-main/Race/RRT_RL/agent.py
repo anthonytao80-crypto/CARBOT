@@ -2,6 +2,15 @@ import carla
 import math
 import random
 
+import os
+import time
+import argparse
+import numpy as np
+
+from config_set import Args
+from network import SAC
+from replaybuffer import ReplayBuffer
+
 class Agent():
     def __init__(self, vehicle=None):
         self.vehicle = vehicle
@@ -79,15 +88,49 @@ class Agent():
         path = self.rrt_plan(ego_x, ego_y, target_x, target_y, filtered_obstacles, boundary)
         next_x, next_y = path[10] if path and len(path) > 10 else (target_x, target_y)
 
+        max_action = np.array(Args['max_action'])
+        max_all_step = Args['max_all_step']
+        agent = SAC(max_action,
+                    Args['a_lr'],
+                    Args['c_lr'],
+                    Args['sac_gamma'],
+                    Args['sac_tau'],
+                    Args['sac_alpha'],
+                    Args['sac_policy'],
+                    Args['sac_policy_freq'],
+                    Args['sac_auto_entropy_tuning'],
+                    Args['debug'],
+                    Args['back_enable'])
+        if Args['model_load']:
+            agent.load(Args['train_file'], Args['model_path'])
+        if Args['model_save'] or Args['check_save']:
+            now = time.localtime()
+            save_file = ''.join(
+                ('SAC_model_', str(now.tm_year), str(now.tm_mon), str(now.tm_mday), str(now.tm_hour), str(now.tm_min),
+                 str(now.tm_sec)))
+            save_path = os.path.join(Args['model_path'], save_file)
+            try:
+                os.mkdir(save_path)
+            except:
+                print('Failed to create model folder.')
+
+        replay_buffer = ReplayBuffer(Args['frame_size'],
+                                     Args['state_size'],
+                                     Args['action_size'],
+                                     Args['buffer_size'],
+                                     Args['buffer_seed'])
+
+        done = True  ## episode done
+        restart = False  ## episode discard & restart
+        episode = -1  ## current episode
+        total_step = 0  ## total step
+        done_count = 0  ## count of success episode
+        loss_set = []  ## loss record
+        episode_set = []  ## performance record
+        train_time = time.time()  ## total used time
 
 
-        steering = self.calculate_steering(ego_x, ego_y, ego_yaw, next_x, next_y)
-        control.steer = steering
-        self.steer = steering
 
-        throttle, brake = self.calculate_speed_control(
-            ego_x, ego_y, ego_yaw, filtered_obstacles, current_speed,
-            steering, boundary[0], boundary[1], (target_x, target_y), waypoints)
         control.throttle = throttle
         control.brake = brake
         return control
@@ -174,195 +217,3 @@ class Agent():
         t = ((x1 - x3)*(y3 - y4) - (y1 - y3)*(x3 - x4)) / denom
         u = -((x1 - x2)*(y1 - y3) - (y1 - y2)*(x1 - x3)) / denom
         return (0 <= t <= 1 and 0 <= u <= 1), 0
-
-    def calculate_steering(self, ego_x, ego_y, ego_yaw, target_x, target_y):
-        yaw_rad = math.radians(ego_yaw)
-        dx = target_x - ego_x
-        dy = target_y - ego_y
-        angle_diff = math.atan2(dy, dx) - yaw_rad
-        angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi
-        return max(min(angle_diff / (math.pi / 2), 1.0), -1.0)
-
-
-    def is_sharp_turn_ahead(self, ego_x, ego_y, waypoints, lookahead=5):
-        if len(waypoints) < lookahead + 1:
-            return False
-
-        # Vector from current pos to next point
-        dx1 = waypoints[1][0] - ego_x
-        dy1 = waypoints[1][1] - ego_y
-        dx2 = waypoints[lookahead][0] - waypoints[1][0]
-        dy2 = waypoints[lookahead][1] - waypoints[1][1]
-
-        angle1 = math.atan2(dy1, dx1)
-        angle2 = math.atan2(dy2, dx2)
-        angle_diff = abs((angle2 - angle1 + math.pi) % (2 * math.pi) - math.pi)
-
-        return angle_diff > math.radians(30)  # tweak this threshold
-
-
-
-
-
-    def estimate_road_width(self, left, right, index=5):
-        if len(left) <= index or len(right) <= index:
-            return float('inf')  # no boundary info
-        lx, ly = left[index].transform.location.x, left[index].transform.location.y
-        rx, ry = right[index].transform.location.x, right[index].transform.location.y
-        return math.hypot(rx - lx, ry - ly)
-
-
-
-    def calculate_speed_control(self, ego_x, ego_y, ego_yaw, obstacles, speed, steer, left, right, target,waypoints):
-        yaw_rad = math.radians(ego_yaw)
-        fx, fy = math.cos(yaw_rad), math.sin(yaw_rad)
-        self.stopping_distance = speed ** 2 / 10
-
-        # Road width analysis
-        road_width = self.estimate_road_width(left, right, index=5)
-        is_narrow_road = road_width < 5  # meters
-
-        # Emergency brake
-        for obs in obstacles:
-            ox, oy = obs.get_location().x, obs.get_location().y
-            vx, vy = obs.get_velocity().x, obs.get_velocity().y
-            dx, dy = ox - ego_x, oy - ego_y
-            dist = math.hypot(dx, dy)
-            dot = dx * fx + dy * fy
-
-            if dot < 0:
-                return 0.5,0.0
-            if dist > 0 and dot > 0 and dot / dist > math.cos(math.radians(10)):
-                rel_speed = speed - (vx * fx + vy * fy)
-                if rel_speed > 0 and dist < self.stopping_distance + 5:
-                    return 0.0, 1.0
-
-
-
-        # 2. Nearby obstacle
-        for obs in obstacles:
-            ox, oy = obs.get_location().x, obs.get_location().y
-            if math.hypot(ox - ego_x, oy - ego_y) < self.min_distance_to_obstacle + 1.5:
-                return 0.2, 0.0
-
-        # 3. Sharp turn brake based on steering + narrow lane
-        steer_strength = abs(steer)
-        print(f"Steer: {steer_strength:.2f} | Speed: {speed:.2f} | Width: {road_width:.2f}")
-        if steer_strength > 0.35 and speed > 5 and is_narrow_road:
-            return 0.0, 1.0
-
-        curve_radius = self.estimate_curvature_radius(waypoints)
-        print(f"Radius: {curve_radius:.2f}")
-
-
-
-        edge_dist = self.distance_to_edge(ego_x, ego_y, left, right)
-        print('Edge dist',edge_dist, 'Speed',speed)
-        if edge_dist < 5.5 and speed > 18:  # e.g. if too close to road edge
-            return 0.0, 0.1
-
-        print("Curve Radius", curve_radius, "Speed",speed)
-        if curve_radius < 30 and speed > 13:
-
-
-            return 0.0, 1.0
-
-
-        # 4. Turn-based slowdown (mild to medium turns)
-        if steer_strength > 0.3:
-            target_speed = max(15, self.desired_speed * (1.0 - steer_strength))
-            if speed > target_speed:
-                throttle = 0.0
-                brake = min(1.0, (speed - target_speed) / self.desired_speed)
-                return throttle, brake
-            else:
-                throttle = min(0.9, (target_speed - speed) / self.desired_speed)
-                return throttle, 0.0
-
-        # 5. Accelerate on straight if below desired
-        print('Steer Strength', steer_strength)
-        # if steer_strength <= 0.3:
-        #     if speed < self.desired_speed:
-        #         return 1.0, 0.0
-        #     elif speed > self.desired_speed:
-        #         return 0.8, 0.2
-        #     else:
-        #         return 1.0, 0.0
-
-        # 5. Accelerate on straight if below desired — only if path is safe
-        if steer_strength <= 0.3:
-            safe_to_accelerate = True
-
-            # Edge safety during gentle turns
-            if edge_dist < 2.0 and speed > 12:
-                safe_to_accelerate = False
-
-            # Lateral obstacle check (like in sharp turns)
-            for obs in obstacles:
-                ox, oy = obs.get_location().x, obs.get_location().y
-                dx, dy = ox - ego_x, oy - ego_y
-                forward_proj = dx * fx + dy * fy
-                lateral_proj = abs(dx * (-fy) + dy * fx)  # side vector
-
-                if 0 < forward_proj < 10 and lateral_proj < 2.0:
-                    safe_to_accelerate = False
-                    break
-
-            if safe_to_accelerate:
-                if speed < self.desired_speed:
-                    return 1.0, 0.0
-                elif speed > self.desired_speed:
-                    return 0.8, 0.2
-                else:
-                    return 1.0, 0.0
-            else:
-                return 0.4, 0.0  # cautious acceleration
-
-
-        if not self.avoidance_mode and self.avoidance_timer == 0 and speed < self.desired_speed +10:
-            print("Recovery acceleration")
-            return 1.0, 0.0
-
-
-        # 6. Default cruising
-        return 1.0, 0.0
-
-
-    def estimate_curvature_radius(self, waypoints, lookahead=5):
-        if len(waypoints) < lookahead + 1:
-            return float('inf')
-
-        # Get 3 spaced points
-        p1 = waypoints[1]
-        p2 = waypoints[lookahead // 2]
-        p3 = waypoints[lookahead]
-
-        # Compute circle through three points
-        x1, y1 = p1[0], p1[1]
-        x2, y2 = p2[0], p2[1]
-        x3, y3 = p3[0], p3[1]
-
-        A = x1 * (y2 - y3) - y1 * (x2 - x3) + x2 * y3 - x3 * y2
-        B = (x1**2 + y1**2) * (y3 - y2) + (x2**2 + y2**2) * (y1 - y3) + (x3**2 + y3**2) * (y2 - y1)
-        C = (x1**2 + y1**2) * (x2 - x3) + (x2**2 + y2**2) * (x3 - x1) + (x3**2 + y3**2) * (x1 - x2)
-        D = (x1**2 + y1**2) * (x3 * y2 - x2 * y3) + (x2**2 + y2**2) * (x1 * y3 - x3 * y1) + (x3**2 + y3**2) * (x2 * y1 - x1 * y2)
-
-        if A == 0:
-            return float('inf')  # points are colinear
-
-        cx = -B / (2 * A)
-        cy = -C / (2 * A)
-        radius = math.sqrt((cx - x1)**2 + (cy - y1)**2)
-
-        return radius
-
-
-    def distance_to_edge(self, ego_x, ego_y, left, right, index=5):
-        if index >= len(left) or index >= len(right):
-            return float('inf')
-        lx, ly = left[index].transform.location.x, left[index].transform.location.y
-        rx, ry = right[index].transform.location.x, right[index].transform.location.y
-        center_x = (lx + rx) / 2
-        center_y = (ly + ry) / 2
-        dist = math.hypot(ego_x - center_x, ego_y - center_y)
-        return dist
